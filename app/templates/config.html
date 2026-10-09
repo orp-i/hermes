@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">{{ ctx.user_label }}</p>
+    <h1>统一配置</h1>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>说明</h2>
+  <p>本页是唯一需要修改配置的地方。保存后写入容器内 <code>/config/hermes.yaml</code>（宿主机 <code>./config/hermes.yaml</code>）：Web 层在下一次请求刷新，Agent、搜索后端与 LLM 网关按文件 mtime 重新读取，模型、密钥和路由的改动都不需要重启容器。</p>
+  <p>访问码在首次启动时随机生成并写入日志，可在下方修改。普通用户登录后仍需管理员在设备管理页批准设备。</p>
+</section>
+
+<form method="post" action="/admin/config" class="config-form">
+  <section class="panel">
+    <h2>访问、模型与搜索</h2>
+    <div class="config-grid">
+      {% for field in fields %}
+      <label class="config-field">
+        <span>{{ field.label }}</span>
+        <small>{{ field.description }}</small>
+        {% if field.type == "checkbox" %}
+        <input type="checkbox" name="{{ field.name }}" {% if field.value %}checked{% endif %}>
+        {% elif field.type == "password" %}
+        <input type="password" name="{{ field.name }}" placeholder="{{ field.display_value }}">
+        {% elif field.type == "number" %}
+        <input type="number" name="{{ field.name }}" value="{{ field.value }}">
+        {% else %}
+        <input type="text" name="{{ field.name }}" value="{{ field.value }}">
+        {% endif %}
+      </label>
+      {% endfor %}
+    </div>
+    <label class="config-field config-wide">
+      <span>Provider 配置 YAML</span>
+      <small>每个键是 provider ID。type/hermes_provider 是 Hermes 的 provider 参数；custom provider 通常填 type: custom，并配置 base_url、api_key、default_model。</small>
+      <textarea name="llm.providers.__yaml" rows="16">{{ providers_yaml }}</textarea>
+    </label>
+    <button type="submit">保存配置</button>
+  </section>
+</form>
+
+<section class="panel">
+  <h2>使用建议</h2>
+  <ul class="notes">
+    <li>只配置一个模型时，保留 default provider，填写 base_url、api_key 和 default_model。</li>
+    <li>配置多个模型时，在 Provider 配置 YAML 中增加 provider，并在 chat/code/plan/long_context 映射里填写 provider ID。</li>
+    <li>需要联网搜索时，配置 Exa 或 Firecrawl API key，并在对话中明确要求“搜索/最新/来源”。</li>
+    <li>修改 API key、provider 和路由后，下一次模型请求会自动使用新配置；修改容器环境变量仍需重启对应容器。</li>
+    <li>密钥只需填在本页。环境变量与早期的 <code>model.env</code> 仍作为兜底读取，优先级低于本页。</li>
+  </ul>
+</section>
+{% endblock %}

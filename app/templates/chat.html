@@ -1,0 +1,519 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">{{ ctx.user_label }} · {{ ctx.device["label"] }}</p>
+    <h1>对话窗口</h1>
+  </div>
+  <div class="hero-actions">
+    <form method="post" action="/chat/new">
+      <button type="submit">新建会话</button>
+    </form>
+    {% if session["status"] == "active" %}
+    <form method="post" action="/chat/{{ session_id }}/terminate">
+      <button type="submit" class="danger">终止会话</button>
+    </form>
+    {% endif %}
+  </div>
+</section>
+
+<style>
+  .tool-note {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.82em;
+    opacity: 0.72;
+    margin: 0.25em 0;
+    padding: 0.2em 0.5em;
+    border-left: 3px solid #888;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .tool-note.error { border-left-color: #c33; opacity: 1; }
+  .tool-note.timeout { border-left-color: #c80; opacity: 1; }
+  .tool-note.skill { border-left-color: #38a; }
+  .tool-note.running {
+    border-left-color: #067647;
+    opacity: 1;
+    background: #f0fdf4;
+  }
+  .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+</style>
+
+<section class="chat-layout">
+  <div class="panel conversation" data-session-id="{{ session_id }}">
+    <div class="run-state{% if running %} active{% endif %}">
+      {{ "运行中" if running else "空闲" }}
+    </div>
+    <div class="message-list">
+    {% for message in messages %}
+    <article class="message {{ message['role'] }}">
+      <strong>{{ message["role"] }}</strong>
+      <div class="message-body">{{ message["content"]|markdown }}</div>
+    </article>
+    {% endfor %}
+    </div>
+
+    {% if session["status"] == "active" %}
+    <form method="post" action="/chat/{{ session_id }}/message" class="composer" data-session-id="{{ session_id }}">
+      <textarea name="content" required placeholder="输入需求。沙箱里执行任意 bash；上传文件在 ../uploads/，输出文件请写到 ../outputs/"></textarea>
+      <button type="submit" {% if running %}disabled{% endif %}>发送</button>
+    </form>
+    {% else %}
+    <div class="history-note">
+      此会话已{{ "终止" if session["status"] == "closed" else "过期" }}，仅供查看。
+    </div>
+    {% endif %}
+  </div>
+
+  <aside class="panel side">
+    <h2>历史会话</h2>
+    <div class="session-list">
+      {% for item in sessions %}
+      <a class="session-item{% if item.is_current %} current{% endif %}" href="/chat/{{ item.id }}">
+        <strong>{{ item.title }}</strong>
+        <span>{{ "running" if item.running else item.status }} · {{ item.message_count }} 条消息 · {{ item.updated_at }}</span>
+      </a>
+      {% else %}
+      <p class="muted">暂无历史会话。</p>
+      {% endfor %}
+    </div>
+
+    <h2>状态</h2>
+    <dl>
+      <dt>会话</dt><dd>{{ session["status"] }}</dd>
+      <dt>进程</dt><dd>{{ "running" if running else "idle" }}</dd>
+      <dt>Provider</dt><dd>{{ config.llm_default_provider }}</dd>
+      <dt>路由</dt><dd>{{ "on" if config.model_routing_enabled else "off" }}</dd>
+      <dt>搜索</dt><dd>{{ "on" if config.search_enabled else "off" }}</dd>
+    </dl>
+
+    {% if session["status"] == "active" %}
+    <h2>上传</h2>
+    <form method="post" action="/chat/{{ session_id }}/upload" enctype="multipart/form-data" class="stack">
+      <input type="file" name="file" required>
+      <button type="submit">上传文件</button>
+    </form>
+    {% endif %}
+
+    <h2>文件</h2>
+    <div class="file-list">
+      {% for file in files %}
+      <a href="/files/{{ file['id'] }}/download">
+        <strong>{{ file["filename"] }}</strong>
+        <span>{{ file["kind"] }} · {{ file["size"] }} bytes</span>
+      </a>
+      {% else %}
+      <p class="muted">暂无文件。</p>
+      {% endfor %}
+    </div>
+  </aside>
+</section>
+
+<script>
+(function() {
+  const form = document.querySelector('form.composer');
+  const conversation = document.querySelector('.conversation');
+  if (!conversation) return;
+
+  const sid = conversation.dataset.sessionId;
+  const textarea = form ? form.querySelector('textarea[name="content"]') : null;
+  const button = form ? form.querySelector('button[type="submit"]') : null;
+  const messageList = conversation.querySelector('.message-list');
+  const runState = conversation.querySelector('.run-state');
+  let lastMessageSignature = '';
+  let isStreaming = false;
+  let activeSource = null;
+  let activeAssistant = null;
+  let waitingNote = null;
+  let toolNotes = {};
+  let reconnectNote = null;
+
+  function makeArticle(role) {
+    const a = document.createElement('article');
+    a.className = 'message ' + role;
+    const strong = document.createElement('strong');
+    strong.textContent = role;
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    a.appendChild(strong);
+    a.appendChild(body);
+    return { article: a, body: body, raw: '' };
+  }
+  function escapeHtml(text) {
+    return String(text || '').replace(/[&<>"']/g, function(ch) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+    });
+  }
+  function renderInline(text) {
+    let s = escapeHtml(text);
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+    return s;
+  }
+  function renderMarkdown(text) {
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    const out = [];
+    let para = [];
+    let list = null;
+    let code = false;
+    let lang = '';
+    let codeLines = [];
+
+    function flushPara() {
+      if (para.length) {
+        out.push('<p>' + renderInline(para.join(' ')) + '</p>');
+        para = [];
+      }
+    }
+    function closeList() {
+      if (list) {
+        out.push('</' + list + '>');
+        list = null;
+      }
+    }
+    lines.forEach(function(raw) {
+      const line = raw.replace(/\s+$/, '');
+      const fence = line.match(/^\s*```([\w.+-]*)\s*$/);
+      if (fence) {
+        if (code) {
+          const cls = lang ? ' class="language-' + escapeHtml(lang) + '"' : '';
+          out.push('<pre><code' + cls + '>' + escapeHtml(codeLines.join('\n')) + '</code></pre>');
+          code = false;
+          lang = '';
+          codeLines = [];
+        } else {
+          flushPara();
+          closeList();
+          code = true;
+          lang = fence[1] || '';
+        }
+        return;
+      }
+      if (code) {
+        codeLines.push(raw);
+        return;
+      }
+      if (!line.trim()) {
+        flushPara();
+        closeList();
+        return;
+      }
+      const heading = line.match(/^(#{1,4})\s+(.+)$/);
+      if (heading) {
+        flushPara();
+        closeList();
+        const level = heading[1].length;
+        out.push('<h' + level + '>' + renderInline(heading[2].trim()) + '</h' + level + '>');
+        return;
+      }
+      const quote = line.match(/^>\s?(.*)$/);
+      if (quote) {
+        flushPara();
+        closeList();
+        out.push('<blockquote>' + renderInline(quote[1]) + '</blockquote>');
+        return;
+      }
+      const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+      const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      if (unordered || ordered) {
+        flushPara();
+        const tag = unordered ? 'ul' : 'ol';
+        if (list !== tag) {
+          closeList();
+          out.push('<' + tag + '>');
+          list = tag;
+        }
+        out.push('<li>' + renderInline((unordered || ordered)[1]) + '</li>');
+        return;
+      }
+      para.push(line.trim());
+    });
+    if (code) {
+      const cls = lang ? ' class="language-' + escapeHtml(lang) + '"' : '';
+      out.push('<pre><code' + cls + '>' + escapeHtml(codeLines.join('\n')) + '</code></pre>');
+    }
+    flushPara();
+    closeList();
+    return out.join('\n');
+  }
+  function refreshFileList() {
+    return refreshFileListFromRows(null);
+  }
+  function refreshFileListFromRows(rows) {
+    const panel = document.querySelector('.file-list');
+    if (!panel) return;
+    function render(rows) {
+        panel.textContent = '';
+        if (!rows.length) {
+          const p = document.createElement('p');
+          p.className = 'muted';
+          p.textContent = '暂无文件。';
+          panel.appendChild(p);
+          return;
+        }
+        rows.forEach(function(f) {
+          const a = document.createElement('a');
+          a.href = '/files/' + f.id + '/download';
+          const s = document.createElement('strong');
+          s.textContent = f.filename;
+          const meta = document.createElement('span');
+          meta.textContent = f.kind + ' · ' + f.size + ' bytes';
+          a.appendChild(s);
+          a.appendChild(meta);
+          panel.appendChild(a);
+        });
+    }
+    if (Array.isArray(rows)) {
+      render(rows);
+      return;
+    }
+    fetch('/chat/' + encodeURIComponent(sid) + '/files.json',
+          { credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : []; })
+      .then(render)
+      .catch(function() { /* silent — manual refresh still works */ });
+  }
+  function addNote(parentArticle, anchor, text, cls) {
+    const div = document.createElement('div');
+    div.className = 'tool-note' + (cls ? ' ' + cls : '');
+    div.textContent = text;
+    parentArticle.insertBefore(div, anchor);
+    return div;
+  }
+  function scrollConversation() {
+    window.requestAnimationFrame(function() {
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    });
+  }
+  function shortJson(value) {
+    let text = '';
+    try {
+      text = JSON.stringify(value || {});
+    } catch (err) {
+      text = String(value || '');
+    }
+    return text.length > 260 ? text.slice(0, 260) + '...' : text;
+  }
+  function shortOutput(event) {
+    const parts = [];
+    if (event.stdout) parts.push(String(event.stdout).trim());
+    if (event.stderr) parts.push('[stderr] ' + String(event.stderr).trim());
+    const text = parts.join('\n');
+    return text.length > 800 ? text.slice(0, 800) + '\n...' : text;
+  }
+  function ensureActiveAssistant() {
+    if (activeAssistant) return activeAssistant;
+    activeAssistant = makeArticle('hermes');
+    messageList.appendChild(activeAssistant.article);
+    waitingNote = addNote(activeAssistant.article, activeAssistant.body, '等待模型响应...', 'running');
+    scrollConversation();
+    return activeAssistant;
+  }
+  function finishStream() {
+    if (activeSource) {
+      activeSource.close();
+      activeSource = null;
+    }
+    isStreaming = false;
+    activeAssistant = null;
+    waitingNote = null;
+    toolNotes = {};
+    if (reconnectNote) { reconnectNote.remove(); reconnectNote = null; }
+    setRunning(false);
+    refreshFileList();
+    window.setTimeout(refreshMessages, 300);
+  }
+
+  function renderMessages(rows) {
+    if (!messageList) return;
+    const signature = rows.map(function(m) {
+      return m.id + ':' + m.role + ':' + m.content.length;
+    }).join('|');
+    if (signature === lastMessageSignature) return;
+    lastMessageSignature = signature;
+    messageList.textContent = '';
+    rows.forEach(function(m) {
+      const box = makeArticle(m.role);
+      box.raw = m.content || '';
+      box.body.innerHTML = renderMarkdown(box.raw);
+      messageList.appendChild(box.article);
+    });
+  }
+
+  function setRunning(running) {
+    if (runState) {
+      runState.textContent = running ? '运行中' : '空闲';
+      runState.classList.toggle('active', running);
+    }
+    if (button) button.disabled = running;
+    if (textarea) textarea.disabled = running;
+  }
+
+  function refreshMessages() {
+    if (isStreaming) return;
+    fetch('/chat/' + encodeURIComponent(sid) + '/messages.json',
+          { credentials: 'same-origin' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (!data) return;
+        renderMessages(data.messages || []);
+        if (Array.isArray(data.files)) refreshFileListFromRows(data.files);
+        setRunning(Boolean(data.session && data.session.running));
+      })
+      .catch(function() {});
+  }
+
+  if (form) form.addEventListener('submit', function(ev) {
+    ev.preventDefault();
+    const content = (textarea.value || '').trim();
+    if (!content || isStreaming) return;
+
+    const userBox = makeArticle('user');
+    userBox.raw = content;
+    userBox.body.innerHTML = renderMarkdown(content);
+    messageList.appendChild(userBox.article);
+
+    textarea.value = '';
+    isStreaming = true;
+    setRunning(true);
+    ensureActiveAssistant();
+
+    const streamUrl = new URL('/chat/' + encodeURIComponent(sid) + '/stream', window.location.origin);
+    streamUrl.searchParams.set('content', content);
+    activeSource = new EventSource(streamUrl.toString(), { withCredentials: true });
+
+    activeSource.addEventListener('skill_router', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const names = data.activated && data.activated.length ? data.activated.join(', ') : '默认能力';
+      const suffix = data.cached ? '（缓存）' : (data.router === 'keyword' ? '（关键字回退）' : '');
+      const box = ensureActiveAssistant();
+      addNote(box.article, box.body, '技能路由：' + names + suffix, 'skill');
+      scrollConversation();
+    });
+    activeSource.addEventListener('iteration_start', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      if (waitingNote) {
+        waitingNote.textContent = '第 ' + (Number(data.iteration || 0) + 1) + ' 轮生成中...';
+      } else {
+        addNote(box.article, box.body, '第 ' + (Number(data.iteration || 0) + 1) + ' 轮生成中...', 'running');
+      }
+    });
+    activeSource.addEventListener('context_compaction', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      const text = data.compacted
+        ? '上下文压缩：已压缩 ' + (data.old_messages || 0) + ' 条历史，' +
+          'token ' + (data.tokens_before || 0) + ' → ' + (data.tokens_after || 0)
+        : '上下文压缩：未触发，估算 token ' + (data.tokens_before || 0);
+      addNote(box.article, box.body, text, 'skill');
+      scrollConversation();
+    });
+    activeSource.addEventListener('route_selected', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      addNote(
+        box.article,
+        box.body,
+        '模型路由：' + (data.route || 'chat') + (data.cached ? '（缓存）' : ''),
+        'skill'
+      );
+      scrollConversation();
+    });
+    activeSource.addEventListener('assistant_chunk', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      if (waitingNote) {
+        waitingNote.remove();
+        waitingNote = null;
+      }
+      box.raw += data.delta || '';
+      box.body.innerHTML = renderMarkdown(box.raw);
+      scrollConversation();
+    });
+    activeSource.addEventListener('tool_call', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      const id = data.id || data.name || String(Date.now());
+      const text = '调用工具：' + (data.name || 'unknown') + '\n参数：' + shortJson(data.args) + '\n状态：运行中';
+      toolNotes[id] = addNote(box.article, box.body, text, 'running');
+      scrollConversation();
+    });
+    activeSource.addEventListener('tool_result', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const id = data.id || data.name || '';
+      const note = toolNotes[id] || addNote(ensureActiveAssistant().article, ensureActiveAssistant().body, '', '');
+      const failed = Number(data.exit_code || 0) !== 0;
+      const output = shortOutput(data);
+      note.className = 'tool-note' + (data.timed_out ? ' timeout' : failed ? ' error' : '');
+      note.textContent = '工具完成：' + (data.name || 'unknown') +
+        '\n退出码：' + (data.exit_code || 0) +
+        ' · 耗时：' + (data.duration_ms || 0) + 'ms' +
+        (data.timed_out ? '\n状态：超时' : '') +
+        (output ? '\n输出预览：\n' + output : '');
+      refreshFileList();
+      scrollConversation();
+    });
+    activeSource.addEventListener('final', function(ev) {
+      const data = JSON.parse(ev.data || '{}');
+      const box = ensureActiveAssistant();
+      if (data.content && data.content !== box.raw) {
+        box.raw = data.content;
+        box.body.innerHTML = renderMarkdown(box.raw);
+      }
+    });
+    ['timeout', 'max_iters', 'provider_error'].forEach(function(type) {
+      activeSource.addEventListener(type, function(ev) {
+        const data = JSON.parse(ev.data || '{}');
+        const box = ensureActiveAssistant();
+        const message = data.message || 'Agent 调用失败';
+        addNote(box.article, box.body, message, type === 'timeout' ? 'timeout' : 'error');
+        if (!box.raw) box.body.innerHTML = renderMarkdown(message);
+        scrollConversation();
+      });
+    });
+    activeSource.addEventListener('done', function() {
+      if (reconnectNote) {
+        reconnectNote.remove();
+        reconnectNote = null;
+      }
+      finishStream();
+    });
+    activeSource.onerror = function() {
+      if (!isStreaming || !activeSource) return;
+      // EventSource.readyState: 0=CONNECTING (browser is auto-retrying),
+      // 1=OPEN, 2=CLOSED. We only treat CLOSED as fatal.
+      if (activeSource.readyState === 2) {
+        const box = ensureActiveAssistant();
+        addNote(box.article, box.body, '流式连接已关闭，正在刷新会话状态。', 'error');
+        finishStream();
+        return;
+      }
+      // Still reconnecting — surface a transient note instead of bailing out.
+      const box = ensureActiveAssistant();
+      if (reconnectNote) {
+        reconnectNote.textContent = '连接中断，正在重连（Last-Event-ID 已发送）...';
+      } else {
+        reconnectNote = addNote(box.article, box.body, '连接中断，正在重连...', 'running');
+      }
+      scrollConversation();
+    };
+    activeSource.addEventListener('open', function() {
+      if (reconnectNote) {
+        reconnectNote.textContent = '连接已恢复';
+        window.setTimeout(function() {
+          if (reconnectNote) { reconnectNote.remove(); reconnectNote = null; }
+        }, 1500);
+      }
+    });
+  });
+
+  refreshMessages();
+  window.setInterval(refreshMessages, 2500);
+  window.setInterval(refreshFileList, 2500);
+})();
+</script>
+{% endblock %}

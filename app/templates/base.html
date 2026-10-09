@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ config.app_name }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/">{{ config.app_name }}</a>
+      <nav>
+        <a href="/chat">对话</a>
+        {% if admin %}<a href="/admin">设备管理</a><a href="/admin/config">配置</a>{% endif %}
+        <form method="post" action="/logout"><button type="submit">退出</button></form>
+      </nav>
+    </header>
+    <main class="shell">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">{{ ctx.user_label }}</p>
+    <h1>设备管理</h1>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>设备</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>邮箱</th><th>设备</th><th>状态</th><th>创建</th><th>最近访问</th><th>操作</th></tr></thead>
+      <tbody>
+        {% for d in devices %}
+        <tr>
+          <td>{{ d["id"] }}</td>
+          <td>{{ d["email"] }}</td>
+          <td>{{ d["label"] }}</td>
+          <td><span class="status {{ d['status'] }}">{{ d["status"] }}</span></td>
+          <td>{{ d["created_at"] }}</td>
+          <td>{{ d["last_seen_at"] or "-" }}</td>
+          <td class="actions">
+            <form method="post" action="/admin/devices/{{ d['id'] }}/approve"><button>批准</button></form>
+            <form method="post" action="/admin/devices/{{ d['id'] }}/reject"><button>拒绝</button></form>
+            <form method="post" action="/admin/devices/{{ d['id'] }}/revoke"><button>吊销</button></form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>审计</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>事件</th><th>操作者</th><th>对象</th><th>时间</th></tr></thead>
+      <tbody>
+        {% for row in audit %}
+        <tr><td>{{ row["event"] }}</td><td>{{ row["actor_email"] }}</td><td>{{ row["target"] }}</td><td>{{ row["created_at"] }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,36 @@
+# ---- secrets: never commit ----
+.env
+model.env
+config/hermes.yaml
+data/
+*.db
+*.sqlite
+*.sqlite3
+secret_key
+
+# ---- third-party trees kept in this working directory, not part of this project ----
+# upstream pi agent harness (earendil-works/pi, MIT) — reference copy only
+pi-main/
+# unrelated project with its own git history
+ashare-pi-agent/
+# vendored frp release tarball + extracted binaries
+frp_*/
+frp_*.tar.gz
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+.venv-test/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---- runtime / local ----
+workspace/
+.agents/
+.codex
+*.log
+.DS_Store

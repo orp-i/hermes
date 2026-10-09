@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel compact">
+  <p class="eyebrow">{{ ctx.user_label }}</p>
+  <h1>设备等待审批</h1>
+  <dl>
+    <dt>设备</dt><dd>{{ ctx.device["label"] }}</dd>
+    <dt>状态</dt><dd>{{ ctx.device["status"] }}</dd>
+  </dl>
+  {% if admin %}
+  <p><a class="button" href="/admin">进入设备管理</a></p>
+  {% endif %}
+</section>
+{% endblock %}

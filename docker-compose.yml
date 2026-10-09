@@ -1,0 +1,160 @@
+services:
+  sandbox:
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+      args:
+        USE_TUNA_MIRROR: "${USE_TUNA_MIRROR:-1}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        APT_MIRROR: "${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+    image: hermes-sandbox:latest
+    container_name: hermes-sandbox
+    restart: unless-stopped
+    init: true
+    environment:
+      # No-proxy mode: explicitly clear any inherited HTTP(S)_PROXY so user-issued
+      # bash commands (curl/wget/pip) in the sandbox go direct, not via netbird.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      - hermes-workspace:/workspace
+      # Read-only mount of the host hermes project, so the agent can review code under /code.
+      - ./:/code:ro
+    mem_limit: 4g
+    pids_limit: 512
+    # No inbound port; the sandbox is reached only via `docker exec` from the runner.
+
+  runner:
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+      args:
+        USE_TUNA_MIRROR: "${USE_TUNA_MIRROR:-1}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        APT_MIRROR: "${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+    image: hermes-runner:latest
+    container_name: hermes-runner
+    restart: unless-stopped
+    depends_on:
+      - sandbox
+    environment:
+      HERMES_RUNNER_TOKEN: "${HERMES_RUNNER_TOKEN:?HERMES_RUNNER_TOKEN must be set in .env}"
+      HERMES_SANDBOX_CONTAINER: "hermes-sandbox"
+      HERMES_SANDBOX_WORKSPACE: "/workspace"
+      HERMES_RUNNER_MAX_TOOL_TIMEOUT_SEC: "${HERMES_RUNNER_MAX_TOOL_TIMEOUT_SEC:-1200}"
+      # No-proxy mode: prevent any inherited proxy var from routing runner HTTP through netbird.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      # The runner is the only container that holds docker.sock.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Same workspace mount so /ensure-session-dirs creates dirs the sandbox sees.
+      - hermes-workspace:/workspace
+    # No inbound port published to host; reachable only from the hermes container
+    # over the default compose network at http://hermes-runner:8650.
+
+  hermes:
+    build:
+      context: .
+      args:
+        USE_TUNA_MIRROR: "${USE_TUNA_MIRROR:-1}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        APT_MIRROR: "${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+    container_name: hermes
+    restart: unless-stopped
+    depends_on:
+      - runner
+      - llm-router
+    environment:
+      HERMES_APP_NAME: "Hermes"
+      HERMES_DATABASE: "/data/hermes.db"
+      HERMES_WORKSPACE: "/workspace"
+      HERMES_HOME: "/opt/data"
+      HERMES_UNIFIED_CONFIG: "/config/hermes.yaml"
+      # Agent provider config
+      HERMES_AGENT_PROVIDER: "gateway"
+      HERMES_GATEWAY_BASE_URL: "http://llm-router:8642/v1"
+      HERMES_GATEWAY_API_KEY: "${HERMES_LLM_ROUTER_TOKEN:-local-gateway}"
+      HERMES_GATEWAY_MODEL: "${HERMES_GATEWAY_MODEL:-chat}"
+      HERMES_SEARCH_BACKEND: "tavily+duckduckgo"
+      HERMES_SEARCH_TOOL_TIMEOUT_SEC: "${HERMES_SEARCH_TOOL_TIMEOUT_SEC:-18}"
+      HERMES_SEARCH_BACKEND_TIMEOUT_SEC: "${HERMES_SEARCH_BACKEND_TIMEOUT_SEC:-8}"
+      # Runner client config (no docker.sock here)
+      HERMES_RUNNER_BASE_URL: "http://hermes-runner:8650"
+      HERMES_RUNNER_TOKEN: "${HERMES_RUNNER_TOKEN:?HERMES_RUNNER_TOKEN must be set in .env}"
+      HERMES_SANDBOX_WORKSPACE: "/workspace"
+      # Timeouts (seconds)
+      HERMES_AGENT_TIMEOUT_SEC: "${HERMES_AGENT_TIMEOUT_SEC:-1200}"
+      HERMES_MAX_TOOL_TIMEOUT_SEC: "${HERMES_MAX_TOOL_TIMEOUT_SEC:-1200}"
+      HERMES_RUNNER_HTTP_TIMEOUT_SEC: "${HERMES_RUNNER_HTTP_TIMEOUT_SEC:-1220}"
+      HERMES_GATEWAY_TIMEOUT: "${HERMES_GATEWAY_TIMEOUT:-1200}"
+      # No-proxy mode: outbound LLM / search / file traffic goes direct,
+      # NOT through the <mesh-proxy-ip>:8080 netbird-side HTTP proxy.
+      # NO_PROXY=* makes Python's httpx/requests/openai bypass any proxy globally.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+      # validate_references tool: reuses the web_search backend (Tavily+DDG) and
+      # matches each citation against scholarly-domain results. No NCBI dependency.
+    volumes:
+      - hermes-data:/data
+      - hermes-workspace:/workspace
+      - hermes-home:/opt/data
+      - ./config:/config
+      - ./model.env:/srv/hermes-access/model.env:ro
+      - ./skills:/srv/hermes-access/skills:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # No-proxy mode: bind to all host interfaces (LAN + public + netbird) so
+      # external access does NOT have to go through the netbird mesh.
+      - "0.0.0.0:5020:8000"
+
+  llm-router:
+    build:
+      context: .
+      args:
+        USE_TUNA_MIRROR: "${USE_TUNA_MIRROR:-1}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        APT_MIRROR: "${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+    container_name: hermes-llm-router
+    restart: unless-stopped
+    environment:
+      HERMES_UNIFIED_CONFIG: "/config/hermes.yaml"
+      HERMES_LLM_ROUTER_TOKEN: "${HERMES_LLM_ROUTER_TOKEN:-local-gateway}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      XIAOMI_API_KEY: "${XIAOMI_API_KEY:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      HERMES_LLM_ROUTER_TIMEOUT: "${HERMES_LLM_ROUTER_TIMEOUT:-1200}"
+      # No-proxy mode: llm-router forwards to deepseek/xiaomi/openrouter directly.
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+    volumes:
+      - ./config:/config
+      - ./model.env:/srv/hermes-access/model.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    entrypoint: ["/usr/bin/tini", "-g", "--"]
+    command: ["uvicorn", "llm_router.app:app", "--host", "0.0.0.0", "--port", "8642"]
+    expose:
+      - "8642"
+
+volumes:
+  hermes-data:
+  hermes-workspace:
+  hermes-home:

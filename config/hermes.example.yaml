@@ -1,0 +1,86 @@
+# Hermes configuration reference.
+#
+# You do not need to edit this file. On first start the application writes
+# ./config/hermes.yaml with randomly generated access codes and prints them to the
+# container log; everything else is set from the admin config page at /admin/config,
+# which writes back to that same file. This copy documents the shape of it and the
+# keys the page does not expose.
+#
+# Every component re-reads the file when its mtime changes, so saving on the page
+# takes effect without restarting any container.
+
+server:
+  # The URL users actually open: LAN address, public domain or reverse-proxy address.
+  public_base_url: http://localhost:5020
+  bind_ip: 0.0.0.0
+  port: 5020
+
+auth:
+  # Left empty here on purpose. First start generates all three and writes them
+  # back; change them afterwards on the config page.
+  user_access_token: ''
+  admin_token: ''
+  secret_key: ''
+
+limits:
+  max_active_sessions: 2
+  max_sessions_per_user: 1
+  session_ttl_minutes: 30
+  max_upload_mb: 100
+  max_files_per_session: 20
+
+llm:
+  default_provider: default
+  default_model: hermes-agent
+  api_timeout_seconds: 1200
+
+  # Each key is a provider ID referenced by the route mapping below. Fill base_url,
+  # api_key and default_model for any OpenAI-compatible endpoint: DeepSeek, Qwen,
+  # GLM, Moonshot, OpenAI, a local vLLM or Ollama. An api_key may also be written as
+  # ${SOME_ENV_VAR} to read it from the environment instead.
+  providers:
+    default:
+      name: Default
+      type: custom
+      base_url: ''
+      api_key: ''
+      default_model: ''
+      api_mode: chat_completions
+
+  # Which provider serves each task class. The agent asks the local router for a
+  # route alias, not a model name, so changing a mapping re-points traffic without
+  # touching any code.
+  endpoint_model_mapping:
+    router: default
+    chat: default
+    code: default
+    plan: default
+    long_context: default
+    multimodal: default
+    vision: default
+
+models:
+  # Off by default: every route resolves to default_provider until you turn this on.
+  routing_enabled: false
+
+search:
+  enabled: true
+  # duckduckgo needs no credential. Use 'tavily' or 'tavily+duckduckgo' once a key is set.
+  backend: duckduckgo
+  tavily_api_key: ''
+  tavily_max_rounds: 4
+  exa_api_key: ''
+  firecrawl_api_key: ''
+  require_sources: true
+
+agent:
+  # Empty reuses the agent's own provider for the max-iteration supervisor, so a
+  # single configured model is enough to run the whole loop.
+  max_iteration_review_provider: ''
+  max_iteration_review_model: ''
+  max_iteration_review_extra_iters: 4
+  max_iteration_review_max_rounds: 2
+
+tools:
+  # Allowlist for the sandboxed bash tool. Anything not listed is refused.
+  allowed_commands: [python, python3, git, rg, cat, ls, pwd, jq, node, npm]

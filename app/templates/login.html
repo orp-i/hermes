@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel compact">
+  <h1>Hermes</h1>
+  <p>输入访问码后，这台设备会绑定到当前浏览器。普通访问码需要管理员批准设备，管理码会自动批准当前设备。</p>
+  <form method="post" action="/login" class="stack">
+    <label>名称
+      <input name="user_label" required autofocus placeholder="例如：研发笔记本">
+    </label>
+    <label>访问码
+      <input name="access_token" type="password" required>
+    </label>
+    <button type="submit">继续</button>
+  </form>
+</section>
+{% endblock %}
